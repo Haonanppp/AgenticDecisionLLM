@@ -43,12 +43,12 @@ def _inject_css() -> None:
         """
         <style>
           /* Page width */
-          .block-container { padding-top: 1.25rem; padding-bottom: 2.0rem; max-width: 1200px; }
+          .block-container { padding-top: 3.25rem; padding-bottom: 2.0rem; max-width: 1200px; }
 
           /* Header */
           .adq-header {
             display:flex; align-items:flex-end; justify-content:space-between;
-            gap: 1rem; margin-bottom: 0.75rem;
+            gap: 0.25rem; margin-bottom: 0.75rem;
           }
           .adq-title { font-size: 2.2rem; font-weight: 800; line-height: 1.1; }
           .adq-subtitle { color: rgba(49, 51, 63, 0.7); font-size: 0.98rem; margin-top: 0.2rem; }
