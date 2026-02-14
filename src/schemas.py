@@ -9,29 +9,11 @@ class DecisionRequest(BaseModel):
     narrative: str = Field(..., min_length=1)
 
 
-class DecisionContext(BaseModel):
-    """
-    IMPORTANT for Structured Outputs:
-    This must be a closed object (no arbitrary keys).
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    budget_usd: Optional[int] = None
-    budget_mentioned: Optional[bool] = None
-    max_weight_kg: Optional[float] = None
-    os: Optional[str] = None
-    deadline: Optional[str] = None
-    location: Optional[str] = None
-
-    orchestrator_mode: Optional[str] = None
-
-
 class DecisionBrief(BaseModel):
     title: str
     summary: str
     hard_constraints: List[str] = Field(default_factory=list)
     soft_preferences: List[str] = Field(default_factory=list)
-    context: DecisionContext = Field(default_factory=DecisionContext)
 
 
 class Provenance(BaseModel):
