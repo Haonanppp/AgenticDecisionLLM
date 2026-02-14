@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from agenticdq.llm import LLM
-from agenticdq.schemas import DecisionBrief, CriticOutput, FinalOutput
-from agenticdq.utils import complete_and_validate
+from llm import LLM
+from schemas import DecisionBrief, CriticOutput, FinalOutput
+from utils import complete_and_validate
 
 
 class Synthesizer:

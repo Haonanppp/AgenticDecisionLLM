@@ -13,9 +13,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from agenticdq.schemas import DecisionRequest
-from agenticdq.pipeline import run_mvp
-from agenticdq.llm import OpenAILLM
+from schemas import DecisionRequest
+from pipeline import run_mvp
+from llm import OpenAILLM
 
 
 def _load_secrets_into_env():

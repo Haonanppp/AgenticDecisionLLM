@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from agenticdq.schemas import DecisionRequest, FinalOutput
-from agenticdq.llm import LLM, OpenAILLM
+from schemas import DecisionRequest, FinalOutput
+from llm import LLM, OpenAILLM
 
-from agenticdq.agents.orchestrator import Orchestrator
-from agenticdq.agents.alternatives import AlternativesAgent
-from agenticdq.agents.preferences import PreferencesAgent
-from agenticdq.agents.uncertainties import UncertaintiesAgent
-from agenticdq.agents.critic import CriticAgent
-from agenticdq.agents.synthesizer import Synthesizer
+from agents.orchestrator import Orchestrator
+from agents.alternatives import AlternativesAgent
+from agents.preferences import PreferencesAgent
+from agents.uncertainties import UncertaintiesAgent
+from agents.critic import CriticAgent
+from agents.synthesizer import Synthesizer
 
 
 def run_mvp(req: DecisionRequest, llm: LLM | None = None) -> FinalOutput:

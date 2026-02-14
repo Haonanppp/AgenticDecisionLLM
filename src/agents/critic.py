@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from typing import List
-from agenticdq.llm import LLM
-from agenticdq.schemas import DecisionBrief, Item, CriticOutput
-from agenticdq.utils import complete_and_validate
+from llm import LLM
+from schemas import DecisionBrief, Item, CriticOutput
+from utils import complete_and_validate
 
 
 class CriticAgent:

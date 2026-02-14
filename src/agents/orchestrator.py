@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from agenticdq.schemas import DecisionRequest, DecisionBrief
-from agenticdq.llm import LLM
-from agenticdq.utils import complete_and_validate
+from schemas import DecisionRequest, DecisionBrief
+from llm import LLM
+from utils import complete_and_validate
 
 
 class Orchestrator:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from agenticdq.llm import LLM
-from agenticdq.schemas import DecisionBrief, UncertaintiesOutput
-from agenticdq.utils import complete_and_validate
+from llm import LLM
+from schemas import DecisionBrief, UncertaintiesOutput
+from utils import complete_and_validate
 
 
 class UncertaintiesAgent:

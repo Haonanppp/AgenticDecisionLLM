@@ -1,7 +1,7 @@
 import json
 import argparse
-from agenticdq.schemas import DecisionRequest
-from agenticdq.pipeline import run_mvp
+from schemas import DecisionRequest
+from pipeline import run_mvp
 
 
 def main():
