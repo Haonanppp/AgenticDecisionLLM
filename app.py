@@ -98,13 +98,13 @@ def _examples() -> dict[str, dict[str, str]]:
             "title": "Choose between two job offers",
             "narrative": "Offer A: higher salary but long commute. Offer B: lower salary but remote-friendly and better growth. I value learning and work-life balance.",
         },
-        "Choose an apartment": {
-            "title": "Choose an apartment",
-            "narrative": "Budget $2800/month. Prefer quiet, safe neighborhood, close to campus. Will stay for 12 months.",
-        },
         "Choose a research direction": {
             "title": "Choose a research direction",
             "narrative": "I’m deciding between optimization theory, agentic AI evaluation, and applied NLP. I want publishable work within 6–9 months and strong PhD fit.",
+        },
+        "Choose a travel destination": {
+            "title": "Choose a warm winter trip",
+            "narrative": "I want to travel in winter to a warm destination. Budget is $4000 USD for a 5-day trip. It must be international (not within the US).",
         },
     }
 
@@ -309,24 +309,20 @@ def main() -> None:
     # Preferences
     with tabs[3]:
         st.subheader("Preferences")
-        left, right = st.columns(2)
         for i, p in enumerate(out.preferences, 1):
-            target = left if i % 2 == 1 else right
-            with target:
-                st.markdown(f"**{i}. {p.text}**")
+            with st.expander(f"{i}. {p.text}", expanded=(i <= 2)):
                 if p.rationale:
-                    st.caption(p.rationale)
+                    st.write(p.rationale)
+                st.caption(f"Source: {p.provenance.agent} • iteration {p.provenance.iteration}")
 
     # Uncertainties
     with tabs[4]:
         st.subheader("Uncertainties")
-        left, right = st.columns(2)
         for i, u in enumerate(out.uncertainties, 1):
-            target = left if i % 2 == 1 else right
-            with target:
-                st.markdown(f"**{i}. {u.text}**")
+            with st.expander(f"{i}. {u.text}", expanded=(i <= 2)):
                 if u.rationale:
-                    st.caption(u.rationale)
+                    st.write(u.rationale)
+                st.caption(f"Source: {u.provenance.agent} • iteration {u.provenance.iteration}")
 
     # Raw JSON
     if show_raw:
