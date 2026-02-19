@@ -85,6 +85,12 @@ def _inject_css() -> None:
 
           /* Sidebar spacing */
           section[data-testid="stSidebar"] .block-container { padding-top: 1.0rem; }
+
+          /* Slightly emphasize progress bar */
+          div[data-testid="stProgress"] > div > div > div {
+            height: 10px;
+            border-radius: 999px;
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -138,20 +144,16 @@ def _answer_widget(q: ClarifyingQuestion, value_key: str):
     t = q.expected_answer_type
     opts = q.options or []
 
-    # Keep blank possible for choice/multi_choice
     if t == "choice" and opts:
         return st.selectbox(q.question, options=[""] + opts, key=value_key)
     if t == "multi_choice" and opts:
         return st.multiselect(q.question, options=opts, key=value_key)
 
     if t == "number":
-        # Use text input to allow blank; downstream expects string anyway.
-        return st.text_input(q.question, key=value_key, placeholder="Enter a number (e.g., 1500)")
+        return st.text_input(q.question, key=value_key, placeholder="Enter a number")
     if t == "date":
-        # Use text input to avoid auto-filling a date.
         return st.text_input(q.question, key=value_key, placeholder="YYYY-MM-DD")
 
-    # default free_text
     return st.text_input(q.question, key=value_key)
 
 
@@ -166,6 +168,30 @@ def _build_clarification_answers(questions: list[ClarifyingQuestion]) -> Clarifi
         if raw_str:
             answers.append(ClarificationAnswer(question_id=q.id, answer=raw_str))
     return ClarificationAnswers(answers=answers)
+
+
+def _run_with_visible_loading(label: str, fn):
+    """
+    Make loading more visible: status + progress bar (fallback to spinner if needed).
+    """
+    progress = st.progress(0)
+    try:
+        status_fn = getattr(st, "status", None)
+        if status_fn is not None:
+            with st.status(label, expanded=True) as status:
+                progress.progress(15)
+                result = fn()
+                progress.progress(100)
+                status.update(label="Done", state="complete")
+                return result
+        else:
+            with st.spinner(label):
+                progress.progress(25)
+                result = fn()
+                progress.progress(100)
+                return result
+    finally:
+        progress.empty()
 
 
 def main() -> None:
@@ -186,7 +212,7 @@ def main() -> None:
             <div class="adq-title">Agentic Decision LLM</div>
             <div class="adq-subtitle">Structured decision support from a title + narrative → brief, alternatives, preferences, uncertainties.</div>
           </div>
-          <div class="adq-badge">v0.2</div>
+          <div class="adq-badge">v0.3</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -213,7 +239,6 @@ def main() -> None:
         with st.expander("Advanced", expanded=False):
             show_raw = st.checkbox("Show raw JSON tab", value=True)
             exclude_none = st.checkbox("Hide null fields in JSON", value=True)
-            st.caption("Tip: Hiding null fields makes output cleaner for users.")
 
         st.markdown("---")
         st.caption("Deployment tip: keep your API key in Streamlit Secrets, not in code.")
@@ -224,26 +249,38 @@ def main() -> None:
         st.session_state.title = _examples()[ex_name]["title"]
         st.session_state.narrative = _examples()[ex_name]["narrative"]
 
-    # Update inputs only when user changes the example selection
     if ex_name != st.session_state.example_name:
         st.session_state.example_name = ex_name
         st.session_state.title = _examples()[ex_name]["title"]
         st.session_state.narrative = _examples()[ex_name]["narrative"]
 
-        # Clear prior run states when switching examples
         st.session_state.last_output = None
         st.session_state.last_run_meta = None
         st.session_state.pending_sig = None
         st.session_state.pending_questions = []
+        st.session_state.last_clar_questions = []
+        st.session_state.last_clar_answers = []
+        st.session_state.show_clar_panel = True
 
     if "last_output" not in st.session_state:
         st.session_state.last_output = None
     if "last_run_meta" not in st.session_state:
         st.session_state.last_run_meta = None
+
     if "pending_sig" not in st.session_state:
         st.session_state.pending_sig = None
     if "pending_questions" not in st.session_state:
         st.session_state.pending_questions = []
+
+    # Persist last clarification for viewing even after pipeline finishes
+    if "last_clar_questions" not in st.session_state:
+        st.session_state.last_clar_questions = []
+    if "last_clar_answers" not in st.session_state:
+        st.session_state.last_clar_answers = []
+
+    # Clarification panel show/hide
+    if "show_clar_panel" not in st.session_state:
+        st.session_state.show_clar_panel = True
 
     # --- Input card ---
     st.markdown('<div class="adq-card">', unsafe_allow_html=True)
@@ -271,7 +308,6 @@ def main() -> None:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Persist latest edits to session
     st.session_state.title = title
     st.session_state.narrative = narrative
 
@@ -284,10 +320,9 @@ def main() -> None:
             st.error("OPENAI_API_KEY is not set. Please configure it in Secrets or environment variables.")
             st.stop()
 
-        # Clear previous question inputs if user re-runs
+        # Reset pending question inputs on re-run
         st.session_state.pending_questions = []
         st.session_state.pending_sig = None
-        # Also clear stored answers for previous questions
         for k in list(st.session_state.keys()):
             if str(k).startswith("q_ans_"):
                 del st.session_state[k]
@@ -296,8 +331,10 @@ def main() -> None:
             llm = _get_llm(model.strip() or None)
             req = DecisionRequest(title=title.strip(), narrative=narrative.strip())
 
-            with st.spinner("Running pipeline..."):
-                out = run_mvp(req, llm=llm, use_questioner=use_questioner)
+            def _do_run():
+                return run_mvp(req, llm=llm, use_questioner=use_questioner)
+
+            out = _run_with_visible_loading("Running pipeline...", _do_run)
 
             st.session_state.last_output = out
             st.session_state.last_run_meta = {
@@ -309,10 +346,13 @@ def main() -> None:
                 "use_questioner": use_questioner,
             }
 
-            # If pending clarification, store signature + questions for UI
+            # If pending clarification, store questions for panel/tab
             if out.meta.pending_clarification and out.meta.clarifying_questions:
                 st.session_state.pending_sig = _req_signature(req.title, req.narrative)
                 st.session_state.pending_questions = out.meta.clarifying_questions
+                st.session_state.last_clar_questions = out.meta.clarifying_questions
+                st.session_state.last_clar_answers = []
+                st.session_state.show_clar_panel = True  # auto open when pending
 
             st.success("Done!")
 
@@ -326,48 +366,105 @@ def main() -> None:
         st.info("Load an example or enter your own decision, then click **Run**.")
         return
 
-    # --- Clarification UI (if pending) ---
-    if out.meta.pending_clarification and st.session_state.pending_questions:
+    # --- Clarification panel (collapsible with button on the right) ---
+    show_panel = st.session_state.show_clar_panel
+    has_any_clar = bool(st.session_state.last_clar_questions) or bool(st.session_state.pending_questions)
+
+    if has_any_clar:
         st.markdown('<div class="adq-card">', unsafe_allow_html=True)
-        st.markdown("#### Clarification (Questioner)")
-        st.info("Answer the questions below, then click **Run with answers** to continue.")
 
-        # Safety: ensure inputs did not change after questions were generated
-        current_sig = _req_signature(st.session_state.title, st.session_state.narrative)
-        if st.session_state.pending_sig and current_sig != st.session_state.pending_sig:
-            st.warning("Your title/narrative changed after questions were generated. Please click **Run** again.")
+        h1, h2 = st.columns([0.78, 0.22])
+        with h1:
+            st.markdown("#### Clarification (Questioner)")
+        with h2:
+            btn_label = "Collapse" if show_panel else "Expand"
+            if st.button(btn_label, use_container_width=True):
+                st.session_state.show_clar_panel = not st.session_state.show_clar_panel
+                show_panel = st.session_state.show_clar_panel
+
+        # If still pending, show input UI (but respect signature consistency)
+        is_pending = out.meta.pending_clarification and bool(st.session_state.pending_questions)
+
+        if show_panel:
+            if is_pending:
+                st.info("Answer the questions below, then click **Run with answers** to continue.")
+
+                current_sig = _req_signature(st.session_state.title, st.session_state.narrative)
+                if st.session_state.pending_sig and current_sig != st.session_state.pending_sig:
+                    st.warning("Your title/narrative changed after questions were generated. Please click **Run** again.")
+                else:
+                    with st.form("clar_form", clear_on_submit=False):
+                        for q in st.session_state.pending_questions:
+                            key = f"q_ans_{q.id}"
+                            _answer_widget(q, key)
+                            if q.rationale:
+                                st.caption(f"Why this matters: {q.rationale}")
+
+                        run_with_answers = st.form_submit_button(
+                            "Run with answers",
+                            type="primary",
+                            use_container_width=True,
+                        )
+
+                    if run_with_answers:
+                        llm = _get_llm((meta["model"] if meta else default_model).strip() or None)
+                        req = DecisionRequest(title=st.session_state.title.strip(), narrative=st.session_state.narrative.strip())
+                        clar = _build_clarification_answers(st.session_state.pending_questions)
+
+                        def _do_run2():
+                            return run_mvp(req, llm=llm, use_questioner=True, clarification_answers=clar)
+
+                        out2 = _run_with_visible_loading("Running pipeline with clarification answers...", _do_run2)
+
+                        # Ensure UI can display questions/answers even if FinalOutput didn't include questions
+                        out2.meta.used_questioner = True
+                        out2.meta.clarifying_questions = st.session_state.pending_questions
+                        out2.meta.clarification_answers = clar.answers
+
+                        st.session_state.last_output = out2
+                        st.session_state.last_run_meta = {
+                            "model": meta["model"] if meta else default_model,
+                            "time": _fmt_time_utc(),
+                            "n_alts": len(out2.alternatives),
+                            "n_prefs": len(out2.preferences),
+                            "n_uncs": len(out2.uncertainties),
+                            "use_questioner": True,
+                        }
+
+                        # Persist for panel/tab
+                        st.session_state.last_clar_questions = st.session_state.pending_questions
+                        st.session_state.last_clar_answers = clar.answers
+
+                        # Clear pending, auto-collapse panel
+                        st.session_state.pending_questions = []
+                        st.session_state.pending_sig = None
+                        st.session_state.show_clar_panel = False
+
+                        st.success("Done!")
+                        out = out2
+                        meta = st.session_state.last_run_meta
+
+            else:
+                # Not pending: show last Q/A if available
+                if st.session_state.last_clar_questions:
+                    st.markdown("**Questions**")
+                    for q in st.session_state.last_clar_questions:
+                        st.markdown(f"- **{q.id}** ({q.category}) {q.question}")
+                else:
+                    st.markdown('<span class="adq-muted">No questions were asked.</span>', unsafe_allow_html=True)
+
+                if st.session_state.last_clar_answers:
+                    st.markdown("**Answers**")
+                    for a in st.session_state.last_clar_answers:
+                        st.markdown(f"- **{a.question_id}**: {a.answer}")
+                else:
+                    st.markdown('<span class="adq-muted">No answers were provided.</span>', unsafe_allow_html=True)
         else:
-            with st.form("clar_form", clear_on_submit=False):
-                for q in st.session_state.pending_questions:
-                    key = f"q_ans_{q.id}"
-                    _answer_widget(q, key)
-                    if q.rationale:
-                        st.caption(f"Why this matters: {q.rationale}")
-
-                run_with_answers = st.form_submit_button("Run with answers", type="primary", use_container_width=True)
-
-            if run_with_answers:
-                llm = _get_llm((meta["model"] if meta else default_model).strip() or None)
-                req = DecisionRequest(title=st.session_state.title.strip(), narrative=st.session_state.narrative.strip())
-                clar = _build_clarification_answers(st.session_state.pending_questions)
-
-                with st.spinner("Running pipeline with clarification answers..."):
-                    out2 = run_mvp(req, llm=llm, use_questioner=True, clarification_answers=clar)
-
-                st.session_state.last_output = out2
-                st.session_state.last_run_meta = {
-                    "model": meta["model"] if meta else default_model,
-                    "time": _fmt_time_utc(),
-                    "n_alts": len(out2.alternatives),
-                    "n_prefs": len(out2.preferences),
-                    "n_uncs": len(out2.uncertainties),
-                    "use_questioner": True,
-                }
-                st.session_state.pending_questions = []
-                st.session_state.pending_sig = None
-                st.success("Done!")
-                out = out2
-                meta = st.session_state.last_run_meta
+            # Collapsed view: show a small hint
+            if is_pending:
+                st.caption("Clarification is pending. Click **Expand** to answer questions.")
+            else:
+                st.caption("Clarification panel is collapsed. Click **Expand** to view questions/answers.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -385,7 +482,15 @@ def main() -> None:
         st.caption(f"Last run: {meta['time']} • Questioner: {'ON' if meta.get('use_questioner') else 'OFF'}")
 
     # Tabs
-    base_tabs = ["Overview", "Brief", "Clarification", "Alternatives", "Preferences", "Uncertainties"]
+    base_tabs = [
+        "Overview",
+        "Brief",
+        "Clarification",
+        "Alternatives",
+        "Preferences",
+        "Uncertainties",
+        "Critic",
+    ]
     if show_raw:
         base_tabs.append("Raw JSON")
     tabs = st.tabs(base_tabs)
@@ -420,24 +525,26 @@ def main() -> None:
     # Clarification tab
     with tabs[2]:
         st.subheader("Questioner (Clarification)")
-        if out.meta.used_questioner or out.meta.pending_clarification:
-            if out.meta.clarifying_questions:
-                st.markdown("**Questions**")
-                for q in out.meta.clarifying_questions:
-                    st.markdown(f"- **{q.id}** ({q.category}) {q.question}")
-            else:
-                st.markdown('<span class="adq-muted">No questions were asked.</span>', unsafe_allow_html=True)
 
-            if out.meta.clarification_answers:
-                st.markdown("**Your answers**")
-                for a in out.meta.clarification_answers:
-                    st.markdown(f"- **{a.question_id}**: {a.answer}")
-            elif out.meta.pending_clarification:
+        qs = out.meta.clarifying_questions or st.session_state.last_clar_questions
+        ans = out.meta.clarification_answers or st.session_state.last_clar_answers
+
+        if qs:
+            st.markdown("**Questions**")
+            for q in qs:
+                st.markdown(f"- **{q.id}** ({q.category}) {q.question}")
+        else:
+            st.markdown('<span class="adq-muted">No questions were asked.</span>', unsafe_allow_html=True)
+
+        if ans:
+            st.markdown("**Answers**")
+            for a in ans:
+                st.markdown(f"- **{a.question_id}**: {a.answer}")
+        else:
+            if out.meta.pending_clarification:
                 st.markdown('<span class="adq-muted">Waiting for answers.</span>', unsafe_allow_html=True)
             else:
                 st.markdown('<span class="adq-muted">No answers were provided.</span>', unsafe_allow_html=True)
-        else:
-            st.markdown('<span class="adq-muted">Questioner was disabled for this run.</span>', unsafe_allow_html=True)
 
     # Alternatives
     with tabs[3]:
@@ -471,6 +578,17 @@ def main() -> None:
                 if u.rationale:
                     st.write(u.rationale)
                 st.caption(f"Source: {u.provenance.agent} • iteration {u.provenance.iteration}")
+
+    # Critic
+    with tabs[6]:
+        st.subheader("Critic")
+        notes = out.meta.critic_notes or []
+        if notes:
+            st.markdown("**Critic notes**")
+            for n in notes:
+                st.markdown(f"- {n}")
+        else:
+            st.markdown('<span class="adq-muted">No critic notes.</span>', unsafe_allow_html=True)
 
     # Raw JSON
     if show_raw:
