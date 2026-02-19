@@ -170,28 +170,74 @@ def _build_clarification_answers(questions: list[ClarifyingQuestion]) -> Clarifi
     return ClarificationAnswers(answers=answers)
 
 
-def _run_with_visible_loading(label: str, fn):
+def _run_mvp_with_progress(
+    header_label: str,
+    *,
+    req: DecisionRequest,
+    llm,
+    use_questioner: bool,
+    clarification_answers: ClarificationAnswers | None = None,
+):
     """
-    Make loading more visible: status + progress bar (fallback to spinner if needed).
+    Run pipeline with a stage-based progress bar + dynamic status text.
+
+    IMPORTANT:
+    This requires run_mvp(..., progress=cb) and the pipeline to invoke cb(stage, pct).
     """
-    progress = st.progress(0)
-    try:
-        status_fn = getattr(st, "status", None)
-        if status_fn is not None:
-            with st.status(label, expanded=True) as status:
-                progress.progress(15)
-                result = fn()
-                progress.progress(100)
-                status.update(label="Done", state="complete")
-                return result
+    progress_bar = st.progress(0)
+    status_fn = getattr(st, "status", None)
+
+    status_box = status_fn(header_label, expanded=True) if status_fn is not None else None
+    fallback = st.empty() if status_box is None else None
+
+    last_stage = {"text": ""}
+
+    def cb(stage: str, pct: int) -> None:
+        pct_int = max(0, min(100, int(pct)))
+        progress_bar.progress(pct_int)
+
+        if status_box is not None:
+            status_box.update(label=stage, state="running", expanded=True)
+
+            # Minimal stage log (optional). Keep it short and avoid duplicates.
+            if stage != last_stage["text"]:
+                status_box.write(stage)
+                last_stage["text"] = stage
         else:
-            with st.spinner(label):
-                progress.progress(25)
-                result = fn()
-                progress.progress(100)
-                return result
+            fallback.info(stage)
+
+    try:
+        out = run_mvp(
+            req,
+            llm=llm,
+            use_questioner=use_questioner,
+            clarification_answers=clarification_answers,
+            progress=cb,
+        )
+
+        # If pipeline returned early for clarification, keep it visible.
+        if getattr(out, "meta", None) is not None and out.meta.pending_clarification:
+            if status_box is not None:
+                status_box.update(
+                    label="Clarification needed — please answer the questions below.",
+                    state="complete",
+                    expanded=True,
+                )
+        else:
+            if status_box is not None:
+                status_box.update(label="Done", state="complete", expanded=False)
+
+        return out
+
+    except Exception as e:
+        if status_box is not None:
+            status_box.update(label=f"Error: {e}", state="error", expanded=True)
+        raise
     finally:
-        progress.empty()
+        # Keep progress bar visible after completion (looks nicer).
+        # If you prefer to hide it, uncomment:
+        # progress_bar.empty()
+        pass
 
 
 def main() -> None:
@@ -212,7 +258,7 @@ def main() -> None:
             <div class="adq-title">Agentic Decision LLM</div>
             <div class="adq-subtitle">Structured decision support from a title + narrative → brief, alternatives, preferences, uncertainties.</div>
           </div>
-          <div class="adq-badge">v0.3</div>
+          <div class="adq-badge">v0.4</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -331,10 +377,13 @@ def main() -> None:
             llm = _get_llm(model.strip() or None)
             req = DecisionRequest(title=title.strip(), narrative=narrative.strip())
 
-            def _do_run():
-                return run_mvp(req, llm=llm, use_questioner=use_questioner)
-
-            out = _run_with_visible_loading("Running pipeline...", _do_run)
+            out = _run_mvp_with_progress(
+                "Running pipeline...",
+                req=req,
+                llm=llm,
+                use_questioner=use_questioner,
+                clarification_answers=None,
+            )
 
             st.session_state.last_output = out
             st.session_state.last_run_meta = {
@@ -408,15 +457,21 @@ def main() -> None:
 
                     if run_with_answers:
                         llm = _get_llm((meta["model"] if meta else default_model).strip() or None)
-                        req = DecisionRequest(title=st.session_state.title.strip(), narrative=st.session_state.narrative.strip())
+                        req2 = DecisionRequest(
+                            title=st.session_state.title.strip(),
+                            narrative=st.session_state.narrative.strip(),
+                        )
                         clar = _build_clarification_answers(st.session_state.pending_questions)
 
-                        def _do_run2():
-                            return run_mvp(req, llm=llm, use_questioner=True, clarification_answers=clar)
+                        out2 = _run_mvp_with_progress(
+                            "Running pipeline with clarification answers...",
+                            req=req2,
+                            llm=llm,
+                            use_questioner=True,
+                            clarification_answers=clar,
+                        )
 
-                        out2 = _run_with_visible_loading("Running pipeline with clarification answers...", _do_run2)
-
-                        # Ensure UI can display questions/answers even if FinalOutput didn't include questions
+                        # Ensure UI can display Q/A even if FinalOutput didn't include questions
                         out2.meta.used_questioner = True
                         out2.meta.clarifying_questions = st.session_state.pending_questions
                         out2.meta.clarification_answers = clar.answers
@@ -460,7 +515,6 @@ def main() -> None:
                 else:
                     st.markdown('<span class="adq-muted">No answers were provided.</span>', unsafe_allow_html=True)
         else:
-            # Collapsed view: show a small hint
             if is_pending:
                 st.caption("Clarification is pending. Click **Expand** to answer questions.")
             else:
