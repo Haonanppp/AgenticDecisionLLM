@@ -15,6 +15,29 @@ class DecisionBrief(BaseModel):
     hard_constraints: List[str] = Field(default_factory=list)
     soft_preferences: List[str] = Field(default_factory=list)
 
+class ClarifyingQuestion(BaseModel):
+    id: str = Field(..., min_length=1)  # e.g. "q1"
+    category: Literal["hard_constraint", "soft_preference", "uncertainty", "context"]
+    question: str = Field(..., min_length=5)
+    expected_answer_type: Literal["free_text", "number", "date", "choice", "multi_choice"] = "free_text"
+    options: List[str] = Field(default_factory=list)
+    rationale: Optional[str] = None
+
+
+class QuestionerOutput(BaseModel):
+    ask: bool = True
+    questions: List[ClarifyingQuestion] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+
+
+class ClarificationAnswer(BaseModel):
+    question_id: str
+    answer: str = Field(..., min_length=1)
+
+
+class ClarificationAnswers(BaseModel):
+    answers: List[ClarificationAnswer] = Field(default_factory=list)
+
 
 class Provenance(BaseModel):
     agent: str
@@ -48,14 +71,16 @@ class CriticOutput(BaseModel):
 
 
 class Meta(BaseModel):
-    """
-    Also must be closed for Structured Outputs.
-    """
     model_config = ConfigDict(extra="forbid")
 
     mvp: bool = True
     synthesis_summary: Optional[str] = None
     critic_notes: List[str] = Field(default_factory=list)
+
+    used_questioner: bool = False
+    pending_clarification: bool = False
+    clarifying_questions: List[ClarifyingQuestion] = Field(default_factory=list)
+    clarification_answers: List[ClarificationAnswer] = Field(default_factory=list)
 
 
 class FinalOutput(BaseModel):

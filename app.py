@@ -14,7 +14,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from schemas import DecisionRequest
+from schemas import (
+    DecisionRequest,
+    ClarificationAnswers,
+    ClarificationAnswer,
+    ClarifyingQuestion,
+)
 from pipeline import run_mvp
 from llm import OpenAILLM
 
@@ -80,7 +85,6 @@ def _inject_css() -> None:
 
           /* Sidebar spacing */
           section[data-testid="stSidebar"] .block-container { padding-top: 1.0rem; }
-
         </style>
         """,
         unsafe_allow_html=True,
@@ -122,6 +126,48 @@ def _fmt_time_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _req_signature(title: str, narrative: str) -> str:
+    return f"{title.strip()}\n---\n{narrative.strip()}"
+
+
+def _answer_widget(q: ClarifyingQuestion, value_key: str):
+    """
+    Render an input widget based on expected_answer_type.
+    Always store values into st.session_state[value_key].
+    """
+    t = q.expected_answer_type
+    opts = q.options or []
+
+    # Keep blank possible for choice/multi_choice
+    if t == "choice" and opts:
+        return st.selectbox(q.question, options=[""] + opts, key=value_key)
+    if t == "multi_choice" and opts:
+        return st.multiselect(q.question, options=opts, key=value_key)
+
+    if t == "number":
+        # Use text input to allow blank; downstream expects string anyway.
+        return st.text_input(q.question, key=value_key, placeholder="Enter a number (e.g., 1500)")
+    if t == "date":
+        # Use text input to avoid auto-filling a date.
+        return st.text_input(q.question, key=value_key, placeholder="YYYY-MM-DD")
+
+    # default free_text
+    return st.text_input(q.question, key=value_key)
+
+
+def _build_clarification_answers(questions: list[ClarifyingQuestion]) -> ClarificationAnswers:
+    answers: list[ClarificationAnswer] = []
+    for q in questions:
+        key = f"q_ans_{q.id}"
+        raw = st.session_state.get(key, "")
+        if isinstance(raw, list):
+            raw = ", ".join([str(x) for x in raw if str(x).strip()])
+        raw_str = str(raw).strip()
+        if raw_str:
+            answers.append(ClarificationAnswer(question_id=q.id, answer=raw_str))
+    return ClarificationAnswers(answers=answers)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Agentic Decision LLM",
@@ -140,7 +186,7 @@ def main() -> None:
             <div class="adq-title">Agentic Decision LLM</div>
             <div class="adq-subtitle">Structured decision support from a title + narrative → brief, alternatives, preferences, uncertainties.</div>
           </div>
-          <div class="adq-badge">v0.1</div>
+          <div class="adq-badge">v0.2</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -153,6 +199,12 @@ def main() -> None:
 
         default_model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
         model = st.text_input("OpenAI model", value=default_model)
+
+        use_questioner = st.checkbox(
+            "Use Questioner (clarification)",
+            value=False,
+            help="When enabled, the system may ask clarifying questions before generating outputs.",
+        )
 
         st.markdown("---")
         st.markdown("### Quick start")
@@ -167,25 +219,31 @@ def main() -> None:
         st.caption("Deployment tip: keep your API key in Streamlit Secrets, not in code.")
 
     # --- Session state init ---
-    if "title" not in st.session_state:
+    if "example_name" not in st.session_state:
+        st.session_state.example_name = ex_name
         st.session_state.title = _examples()[ex_name]["title"]
-    if "narrative" not in st.session_state:
         st.session_state.narrative = _examples()[ex_name]["narrative"]
+
+    # Update inputs only when user changes the example selection
+    if ex_name != st.session_state.example_name:
+        st.session_state.example_name = ex_name
+        st.session_state.title = _examples()[ex_name]["title"]
+        st.session_state.narrative = _examples()[ex_name]["narrative"]
+
+        # Clear prior run states when switching examples
+        st.session_state.last_output = None
+        st.session_state.last_run_meta = None
+        st.session_state.pending_sig = None
+        st.session_state.pending_questions = []
+
     if "last_output" not in st.session_state:
         st.session_state.last_output = None
     if "last_run_meta" not in st.session_state:
         st.session_state.last_run_meta = None
-
-    # If user changes example, refresh inputs
-    # (Only overwrite if the user hasn't started editing)
-    if st.session_state.title == "" and st.session_state.narrative == "":
-        # already blank
-        pass
-
-    # Apply example to state (always)
-    # If you prefer "only apply when blank", change this logic.
-    st.session_state.title = _examples()[ex_name]["title"]
-    st.session_state.narrative = _examples()[ex_name]["narrative"]
+    if "pending_sig" not in st.session_state:
+        st.session_state.pending_sig = None
+    if "pending_questions" not in st.session_state:
+        st.session_state.pending_questions = []
 
     # --- Input card ---
     st.markdown('<div class="adq-card">', unsafe_allow_html=True)
@@ -213,6 +271,10 @@ def main() -> None:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Persist latest edits to session
+    st.session_state.title = title
+    st.session_state.narrative = narrative
+
     # --- Run ---
     if run_btn:
         if not title.strip() or not narrative.strip():
@@ -222,12 +284,20 @@ def main() -> None:
             st.error("OPENAI_API_KEY is not set. Please configure it in Secrets or environment variables.")
             st.stop()
 
+        # Clear previous question inputs if user re-runs
+        st.session_state.pending_questions = []
+        st.session_state.pending_sig = None
+        # Also clear stored answers for previous questions
+        for k in list(st.session_state.keys()):
+            if str(k).startswith("q_ans_"):
+                del st.session_state[k]
+
         try:
             llm = _get_llm(model.strip() or None)
             req = DecisionRequest(title=title.strip(), narrative=narrative.strip())
 
             with st.spinner("Running pipeline..."):
-                out = run_mvp(req, llm=llm)
+                out = run_mvp(req, llm=llm, use_questioner=use_questioner)
 
             st.session_state.last_output = out
             st.session_state.last_run_meta = {
@@ -236,14 +306,19 @@ def main() -> None:
                 "n_alts": len(out.alternatives),
                 "n_prefs": len(out.preferences),
                 "n_uncs": len(out.uncertainties),
+                "use_questioner": use_questioner,
             }
+
+            # If pending clarification, store signature + questions for UI
+            if out.meta.pending_clarification and out.meta.clarifying_questions:
+                st.session_state.pending_sig = _req_signature(req.title, req.narrative)
+                st.session_state.pending_questions = out.meta.clarifying_questions
 
             st.success("Done!")
 
         except Exception as e:
             st.error(f"Error: {e}")
 
-    # --- Results ---
     out = st.session_state.last_output
     meta = st.session_state.last_run_meta
 
@@ -251,10 +326,55 @@ def main() -> None:
         st.info("Load an example or enter your own decision, then click **Run**.")
         return
 
+    # --- Clarification UI (if pending) ---
+    if out.meta.pending_clarification and st.session_state.pending_questions:
+        st.markdown('<div class="adq-card">', unsafe_allow_html=True)
+        st.markdown("#### Clarification (Questioner)")
+        st.info("Answer the questions below, then click **Run with answers** to continue.")
+
+        # Safety: ensure inputs did not change after questions were generated
+        current_sig = _req_signature(st.session_state.title, st.session_state.narrative)
+        if st.session_state.pending_sig and current_sig != st.session_state.pending_sig:
+            st.warning("Your title/narrative changed after questions were generated. Please click **Run** again.")
+        else:
+            with st.form("clar_form", clear_on_submit=False):
+                for q in st.session_state.pending_questions:
+                    key = f"q_ans_{q.id}"
+                    _answer_widget(q, key)
+                    if q.rationale:
+                        st.caption(f"Why this matters: {q.rationale}")
+
+                run_with_answers = st.form_submit_button("Run with answers", type="primary", use_container_width=True)
+
+            if run_with_answers:
+                llm = _get_llm((meta["model"] if meta else default_model).strip() or None)
+                req = DecisionRequest(title=st.session_state.title.strip(), narrative=st.session_state.narrative.strip())
+                clar = _build_clarification_answers(st.session_state.pending_questions)
+
+                with st.spinner("Running pipeline with clarification answers..."):
+                    out2 = run_mvp(req, llm=llm, use_questioner=True, clarification_answers=clar)
+
+                st.session_state.last_output = out2
+                st.session_state.last_run_meta = {
+                    "model": meta["model"] if meta else default_model,
+                    "time": _fmt_time_utc(),
+                    "n_alts": len(out2.alternatives),
+                    "n_prefs": len(out2.preferences),
+                    "n_uncs": len(out2.uncertainties),
+                    "use_questioner": True,
+                }
+                st.session_state.pending_questions = []
+                st.session_state.pending_sig = None
+                st.success("Done!")
+                out = out2
+                meta = st.session_state.last_run_meta
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- Results ---
     st.markdown('<div class="adq-card">', unsafe_allow_html=True)
     st.markdown("#### Results")
 
-    # Metrics row
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Alternatives", meta["n_alts"] if meta else len(out.alternatives))
     m2.metric("Preferences", meta["n_prefs"] if meta else len(out.preferences))
@@ -262,10 +382,10 @@ def main() -> None:
     m4.metric("Model", meta["model"] if meta else "—")
 
     if meta:
-        st.caption(f"Last run: {meta['time']}")
+        st.caption(f"Last run: {meta['time']} • Questioner: {'ON' if meta.get('use_questioner') else 'OFF'}")
 
     # Tabs
-    base_tabs = ["Overview", "Brief", "Alternatives", "Preferences", "Uncertainties"]
+    base_tabs = ["Overview", "Brief", "Clarification", "Alternatives", "Preferences", "Uncertainties"]
     if show_raw:
         base_tabs.append("Raw JSON")
     tabs = st.tabs(base_tabs)
@@ -297,9 +417,33 @@ def main() -> None:
         st.subheader("Decision Brief")
         st.json(out.brief.model_dump(exclude_none=True))
 
-    # Alternatives
+    # Clarification tab
     with tabs[2]:
+        st.subheader("Questioner (Clarification)")
+        if out.meta.used_questioner or out.meta.pending_clarification:
+            if out.meta.clarifying_questions:
+                st.markdown("**Questions**")
+                for q in out.meta.clarifying_questions:
+                    st.markdown(f"- **{q.id}** ({q.category}) {q.question}")
+            else:
+                st.markdown('<span class="adq-muted">No questions were asked.</span>', unsafe_allow_html=True)
+
+            if out.meta.clarification_answers:
+                st.markdown("**Your answers**")
+                for a in out.meta.clarification_answers:
+                    st.markdown(f"- **{a.question_id}**: {a.answer}")
+            elif out.meta.pending_clarification:
+                st.markdown('<span class="adq-muted">Waiting for answers.</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="adq-muted">No answers were provided.</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="adq-muted">Questioner was disabled for this run.</span>', unsafe_allow_html=True)
+
+    # Alternatives
+    with tabs[3]:
         st.subheader("Alternatives")
+        if not out.alternatives:
+            st.markdown('<span class="adq-muted">None</span>', unsafe_allow_html=True)
         for i, a in enumerate(out.alternatives, 1):
             with st.expander(f"{i}. {a.text}", expanded=(i <= 2)):
                 if a.rationale:
@@ -307,8 +451,10 @@ def main() -> None:
                 st.caption(f"Source: {a.provenance.agent} • iteration {a.provenance.iteration}")
 
     # Preferences
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Preferences")
+        if not out.preferences:
+            st.markdown('<span class="adq-muted">None</span>', unsafe_allow_html=True)
         for i, p in enumerate(out.preferences, 1):
             with st.expander(f"{i}. {p.text}", expanded=(i <= 2)):
                 if p.rationale:
@@ -316,8 +462,10 @@ def main() -> None:
                 st.caption(f"Source: {p.provenance.agent} • iteration {p.provenance.iteration}")
 
     # Uncertainties
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Uncertainties")
+        if not out.uncertainties:
+            st.markdown('<span class="adq-muted">None</span>', unsafe_allow_html=True)
         for i, u in enumerate(out.uncertainties, 1):
             with st.expander(f"{i}. {u.text}", expanded=(i <= 2)):
                 if u.rationale:
