@@ -198,8 +198,6 @@ def _run_mvp_with_progress(
 
         if status_box is not None:
             status_box.update(label=stage, state="running", expanded=True)
-
-            # Minimal stage log (optional). Keep it short and avoid duplicates.
             if stage != last_stage["text"]:
                 status_box.write(stage)
                 last_stage["text"] = stage
@@ -215,7 +213,6 @@ def _run_mvp_with_progress(
             progress=cb,
         )
 
-        # If pipeline returned early for clarification, keep it visible.
         if getattr(out, "meta", None) is not None and out.meta.pending_clarification:
             if status_box is not None:
                 status_box.update(
@@ -258,7 +255,7 @@ def main() -> None:
             <div class="adq-title">Agentic Decision LLM</div>
             <div class="adq-subtitle">Structured decision support from a title + narrative → brief, alternatives, preferences, uncertainties.</div>
           </div>
-          <div class="adq-badge">v0.4</div>
+          <div class="adq-badge">v0.2</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -295,6 +292,12 @@ def main() -> None:
         st.session_state.title = _examples()[ex_name]["title"]
         st.session_state.narrative = _examples()[ex_name]["narrative"]
 
+    # Deferred run flags (NEW)
+    if "clar_run_requested" not in st.session_state:
+        st.session_state.clar_run_requested = False
+    if "clar_run_payload" not in st.session_state:
+        st.session_state.clar_run_payload = None
+
     if ex_name != st.session_state.example_name:
         st.session_state.example_name = ex_name
         st.session_state.title = _examples()[ex_name]["title"]
@@ -307,6 +310,10 @@ def main() -> None:
         st.session_state.last_clar_questions = []
         st.session_state.last_clar_answers = []
         st.session_state.show_clar_panel = True
+
+        # Reset deferred run on example switch (NEW)
+        st.session_state.clar_run_requested = False
+        st.session_state.clar_run_payload = None
 
     if "last_output" not in st.session_state:
         st.session_state.last_output = None
@@ -324,7 +331,7 @@ def main() -> None:
     if "last_clar_answers" not in st.session_state:
         st.session_state.last_clar_answers = []
 
-    # Clarification panel show/hide
+    # Clarification panel show/hide (still used while pending)
     if "show_clar_panel" not in st.session_state:
         st.session_state.show_clar_panel = True
 
@@ -359,6 +366,10 @@ def main() -> None:
 
     # --- Run ---
     if run_btn:
+        # Cancel any deferred run if user starts a new run (NEW)
+        st.session_state.clar_run_requested = False
+        st.session_state.clar_run_payload = None
+
         if not title.strip() or not narrative.strip():
             st.warning("Please provide both decision title and narrative.")
             st.stop()
@@ -408,6 +419,49 @@ def main() -> None:
         except Exception as e:
             st.error(f"Error: {e}")
 
+    # --- Deferred run: if user clicked "Run with answers", run pipeline now (NEW) ---
+    if st.session_state.clar_run_requested and st.session_state.clar_run_payload:
+        payload = st.session_state.clar_run_payload
+
+        llm = _get_llm((payload.get("model") or os.getenv("OPENAI_MODEL", "gpt-5-mini")).strip() or None)
+        req2 = DecisionRequest(title=payload["title"], narrative=payload["narrative"])
+
+        clar = ClarificationAnswers.model_validate(payload["answers"])
+        qs = [ClarifyingQuestion.model_validate(x) for x in payload["questions"]]
+
+        out2 = _run_mvp_with_progress(
+            "Running pipeline with clarification answers...",
+            req=req2,
+            llm=llm,
+            use_questioner=True,
+            clarification_answers=clar,
+        )
+
+        # Ensure Q/A visible even if final output doesn't include them
+        out2.meta.used_questioner = True
+        out2.meta.clarifying_questions = qs
+        out2.meta.clarification_answers = clar.answers
+
+        st.session_state.last_output = out2
+        st.session_state.last_run_meta = {
+            "model": payload.get("model") or os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+            "time": _fmt_time_utc(),
+            "n_alts": len(out2.alternatives),
+            "n_prefs": len(out2.preferences),
+            "n_uncs": len(out2.uncertainties),
+            "use_questioner": True,
+        }
+
+        st.session_state.last_clar_questions = qs
+        st.session_state.last_clar_answers = clar.answers
+
+        # Cleanup
+        st.session_state.clar_run_requested = False
+        st.session_state.clar_run_payload = None
+        st.session_state.show_clar_panel = False
+
+        st.success("Done!")
+
     out = st.session_state.last_output
     meta = st.session_state.last_run_meta
 
@@ -415,9 +469,9 @@ def main() -> None:
         st.info("Load an example or enter your own decision, then click **Run**.")
         return
 
-    # --- Clarification panel (collapsible with button on the right) ---
+    # --- Clarification panel: ONLY show when pending (NEW behavior) ---
     show_panel = st.session_state.show_clar_panel
-    has_any_clar = bool(st.session_state.last_clar_questions) or bool(st.session_state.pending_questions)
+    has_any_clar = bool(st.session_state.pending_questions)
 
     if has_any_clar:
         st.markdown('<div class="adq-card">', unsafe_allow_html=True)
@@ -431,94 +485,55 @@ def main() -> None:
                 st.session_state.show_clar_panel = not st.session_state.show_clar_panel
                 show_panel = st.session_state.show_clar_panel
 
-        # If still pending, show input UI (but respect signature consistency)
+        # If still pending, show input UI
         is_pending = out.meta.pending_clarification and bool(st.session_state.pending_questions)
 
-        if show_panel:
-            if is_pending:
-                st.info("Answer the questions below, then click **Run with answers** to continue.")
+        if show_panel and is_pending:
+            st.info("Answer the questions below, then click **Run with answers** to continue.")
 
-                current_sig = _req_signature(st.session_state.title, st.session_state.narrative)
-                if st.session_state.pending_sig and current_sig != st.session_state.pending_sig:
-                    st.warning("Your title/narrative changed after questions were generated. Please click **Run** again.")
-                else:
-                    with st.form("clar_form", clear_on_submit=False):
-                        for q in st.session_state.pending_questions:
-                            key = f"q_ans_{q.id}"
-                            _answer_widget(q, key)
-                            if q.rationale:
-                                st.caption(f"Why this matters: {q.rationale}")
-
-                        run_with_answers = st.form_submit_button(
-                            "Run with answers",
-                            type="primary",
-                            use_container_width=True,
-                        )
-
-                    if run_with_answers:
-                        llm = _get_llm((meta["model"] if meta else default_model).strip() or None)
-                        req2 = DecisionRequest(
-                            title=st.session_state.title.strip(),
-                            narrative=st.session_state.narrative.strip(),
-                        )
-                        clar = _build_clarification_answers(st.session_state.pending_questions)
-
-                        out2 = _run_mvp_with_progress(
-                            "Running pipeline with clarification answers...",
-                            req=req2,
-                            llm=llm,
-                            use_questioner=True,
-                            clarification_answers=clar,
-                        )
-
-                        # Ensure UI can display Q/A even if FinalOutput didn't include questions
-                        out2.meta.used_questioner = True
-                        out2.meta.clarifying_questions = st.session_state.pending_questions
-                        out2.meta.clarification_answers = clar.answers
-
-                        st.session_state.last_output = out2
-                        st.session_state.last_run_meta = {
-                            "model": meta["model"] if meta else default_model,
-                            "time": _fmt_time_utc(),
-                            "n_alts": len(out2.alternatives),
-                            "n_prefs": len(out2.preferences),
-                            "n_uncs": len(out2.uncertainties),
-                            "use_questioner": True,
-                        }
-
-                        # Persist for panel/tab
-                        st.session_state.last_clar_questions = st.session_state.pending_questions
-                        st.session_state.last_clar_answers = clar.answers
-
-                        # Clear pending, auto-collapse panel
-                        st.session_state.pending_questions = []
-                        st.session_state.pending_sig = None
-                        st.session_state.show_clar_panel = False
-
-                        st.success("Done!")
-                        out = out2
-                        meta = st.session_state.last_run_meta
-
+            current_sig = _req_signature(st.session_state.title, st.session_state.narrative)
+            if st.session_state.pending_sig and current_sig != st.session_state.pending_sig:
+                st.warning("Your title/narrative changed after questions were generated. Please click **Run** again.")
             else:
-                # Not pending: show last Q/A if available
-                if st.session_state.last_clar_questions:
-                    st.markdown("**Questions**")
-                    for q in st.session_state.last_clar_questions:
-                        st.markdown(f"- **{q.id}** ({q.category}) {q.question}")
-                else:
-                    st.markdown('<span class="adq-muted">No questions were asked.</span>', unsafe_allow_html=True)
+                with st.form("clar_form", clear_on_submit=False):
+                    for q in st.session_state.pending_questions:
+                        key = f"q_ans_{q.id}"
+                        _answer_widget(q, key)
+                        if q.rationale:
+                            st.caption(f"Why this matters: {q.rationale}")
 
-                if st.session_state.last_clar_answers:
-                    st.markdown("**Answers**")
-                    for a in st.session_state.last_clar_answers:
-                        st.markdown(f"- **{a.question_id}**: {a.answer}")
-                else:
-                    st.markdown('<span class="adq-muted">No answers were provided.</span>', unsafe_allow_html=True)
-        else:
-            if is_pending:
-                st.caption("Clarification is pending. Click **Expand** to answer questions.")
-            else:
-                st.caption("Clarification panel is collapsed. Click **Expand** to view questions/answers.")
+                    run_with_answers = st.form_submit_button(
+                        "Run with answers",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                if run_with_answers:
+                    # Build answers now, close panel immediately, and rerun to start pipeline.
+                    clar = _build_clarification_answers(st.session_state.pending_questions)
+
+                    st.session_state.clar_run_payload = {
+                        "title": st.session_state.title.strip(),
+                        "narrative": st.session_state.narrative.strip(),
+                        "model": (meta["model"] if meta else os.getenv("OPENAI_MODEL", "gpt-5-mini")),
+                        "answers": clar.model_dump(),
+                        "questions": [q.model_dump() for q in st.session_state.pending_questions],
+                    }
+                    st.session_state.clar_run_requested = True
+
+                    # Close/clear the clarification UI immediately to prevent clicks during running
+                    st.session_state.show_clar_panel = False
+                    st.session_state.pending_questions = []
+                    st.session_state.pending_sig = None
+
+                    # Persist Q/A for the Clarification tab
+                    st.session_state.last_clar_questions = [ClarifyingQuestion.model_validate(x) for x in st.session_state.clar_run_payload["questions"]]
+                    st.session_state.last_clar_answers = clar.answers
+
+                    st.rerun()
+
+        elif not show_panel and is_pending:
+            st.caption("Clarification is pending. Click **Expand** to answer questions.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
