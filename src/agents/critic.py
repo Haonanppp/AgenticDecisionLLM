@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from typing import List
+
 from llm import LLM
-from schemas import DecisionBrief, Item, CriticOutput
+from schemas import CriticOutput, DecisionBrief, Item
 from utils import complete_and_validate
 
 
@@ -20,18 +21,25 @@ class CriticAgent:
         iteration: int = 0,
     ) -> CriticOutput:
         system = (
-            "You are the Critic.\n"
-            "You will clean and correct the outputs.\n"
+            "You are the Critic Agent.\n"
+            "You must clean, repair, and assess whether additional clarification is needed.\n"
             "Return JSON ONLY.\n"
             "Goals:\n"
-            "- Remove duplicates and low-quality items.\n"
-            "- Reclassify miscategorized items into correct type.\n"
-            "- Ensure alternatives are actionable choices (not criteria, not questions).\n"
-            "- Ensure preferences are evaluation criteria (not actions).\n"
-            "- Ensure uncertainties are unknowns that could change the best choice.\n"
+            "- Remove duplicates, vague items, infeasible items, and low-quality items.\n"
+            "- Reclassify miscategorized items into the correct bucket.\n"
+            "- Rewrite items for clarity when needed, without inventing user facts.\n"
+            "- Judge whether the current information is sufficient for a detailed and decision-useful answer.\n"
+            "Clarification policy:\n"
+            "- Set needs_clarification=true only when missing user information materially limits specificity, feasibility, tradeoff analysis, or uncertainty framing.\n"
+            "- missing_information must list 1-4 concrete information gaps.\n"
+            "- If outputs are already sufficiently specific and useful, set needs_clarification=false and return an empty missing_information list.\n"
+            "Bucket rules:\n"
+            "- Alternatives must be actionable choices or plans.\n"
+            "- Preferences must be evaluation criteria or value dimensions.\n"
+            "- Uncertainties must be unknowns that could change which alternative is best.\n"
             "Constraints:\n"
-            "- Keep 4-8 alternatives, 5-10 preferences, 5-10 uncertainties (if possible).\n"
-            "- Do NOT invent user facts. You may rewrite for clarity.\n"
+            "- Keep 4-8 alternatives, 5-10 preferences, 5-10 uncertainties when possible.\n"
+            "- Do NOT invent facts that the user did not provide.\n"
             "OUTPUT_SCHEMA: CriticOutput\n"
         )
 
@@ -44,14 +52,33 @@ class CriticAgent:
         }
         user = json.dumps(payload, ensure_ascii=False)
 
-        out = complete_and_validate(self.llm, system=system, user_json=user, model_cls=CriticOutput, retries=2)
+        out = complete_and_validate(
+            self.llm,
+            system=system,
+            user_json=user,
+            model_cls=CriticOutput,
+            retries=2,
+        )
 
-        # Optional hardening: force types to match buckets (avoid model mistakes)
-        for it in out.alternatives:
-            it.type = "alternative"
-        for it in out.preferences:
-            it.type = "preference"
-        for it in out.uncertainties:
-            it.type = "uncertainty"
+        for item in out.alternatives:
+            item.type = "alternative"
+            item.provenance.agent = "critic"
+            item.provenance.iteration = iteration
+
+        for item in out.preferences:
+            item.type = "preference"
+            item.provenance.agent = "critic"
+            item.provenance.iteration = iteration
+
+        for item in out.uncertainties:
+            item.type = "uncertainty"
+            item.provenance.agent = "critic"
+            item.provenance.iteration = iteration
+
+        if len(out.missing_information) > 4:
+            out.missing_information = out.missing_information[:4]
+
+        if not out.missing_information:
+            out.needs_clarification = False
 
         return out

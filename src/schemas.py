@@ -15,8 +15,9 @@ class DecisionBrief(BaseModel):
     hard_constraints: List[str] = Field(default_factory=list)
     soft_preferences: List[str] = Field(default_factory=list)
 
+
 class ClarifyingQuestion(BaseModel):
-    id: str = Field(..., min_length=1)  # e.g. "q1"
+    id: str = Field(..., min_length=1)
     category: Literal["hard_constraint", "soft_preference", "uncertainty", "context"]
     question: str = Field(..., min_length=5)
     expected_answer_type: Literal["free_text", "number", "date", "choice", "multi_choice"] = "free_text"
@@ -69,6 +70,29 @@ class CriticOutput(BaseModel):
     uncertainties: List[Item]
     notes: List[str] = Field(default_factory=list)
 
+    needs_clarification: bool = False
+    missing_information: List[str] = Field(default_factory=list)
+
+
+class IterationRecord(BaseModel):
+    iteration: int = Field(..., ge=0)
+    status: Literal[
+        "initial_questioner",
+        "generation_review",
+        "critic_callback_questioner",
+        "finalized",
+    ]
+    summary: Optional[str] = None
+    notes: List[str] = Field(default_factory=list)
+
+    alternatives_count: int = 0
+    preferences_count: int = 0
+    uncertainties_count: int = 0
+
+    missing_information: List[str] = Field(default_factory=list)
+    asked_questions: List[ClarifyingQuestion] = Field(default_factory=list)
+    received_answers: List[ClarificationAnswer] = Field(default_factory=list)
+
 
 class Meta(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -81,6 +105,10 @@ class Meta(BaseModel):
     pending_clarification: bool = False
     clarifying_questions: List[ClarifyingQuestion] = Field(default_factory=list)
     clarification_answers: List[ClarificationAnswer] = Field(default_factory=list)
+
+    current_iteration: int = 0
+    max_iterations: int = 2
+    iteration_history: List[IterationRecord] = Field(default_factory=list)
 
 
 class FinalOutput(BaseModel):
