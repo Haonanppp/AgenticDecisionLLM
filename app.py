@@ -360,7 +360,26 @@ def main() -> None:
         _require_api_key_ui()
 
         default_model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-        model = st.text_input("OpenAI model", value=default_model)
+        preset_models = ["gpt-5.4", "gpt-5-mini", "Custom"]
+        default_model_clean = default_model.strip() or "gpt-5-mini"
+        default_model_choice = default_model_clean if default_model_clean in {"gpt-5.4", "gpt-5-mini"} else "Custom"
+
+        model_choice = st.selectbox(
+            "OpenAI model",
+            options=preset_models,
+            index=preset_models.index(default_model_choice),
+            help="Choose a preset model or select Custom to enter your own model name.",
+        )
+        custom_model_value = default_model_clean if default_model_choice == "Custom" else ""
+        model = (
+            st.text_input(
+                "Custom model name",
+                value=custom_model_value,
+                placeholder="e.g., gpt-5.4",
+            ).strip()
+            if model_choice == "Custom"
+            else model_choice
+        )
 
         use_questioner = st.checkbox(
             "Use Questioner (clarification)",
